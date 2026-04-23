@@ -31,12 +31,21 @@ Four 1080p MJPEG streams will saturate a single USB 2.0 controller. Rules of thu
 
 ## Logical naming
 
-USB enumeration order is **not stable** — the OS-level index a camera gets can shift across reboots or when cables are reseated. The current approach is a two-step process:
+USB enumeration order is **not stable** — the OS-level index a camera gets can shift across reboots or when cables are reseated. The current approach:
 
-1. Run `camera_view.py`, which tints each OS index with a color (RED / GREEN / BLUE / YELLOW) and shows them in a 2×2 grid.
-2. Visually confirm which color corresponds to which physical camera (front-narrow / front-wide / left / right).
+1. Run `camera_view.py`. It opens cameras in the order the OS enumerated them and overlays the physical name in the top-left of each tile (`front wide`, `front narrow`, `left`, `right`).
+2. If a label doesn't match what that camera is actually pointing at, either re-plug USB cables until the enumeration matches, or reorder `LABELS` in `scripts/camera_view.py` to reflect reality on this machine.
 
-Once that mapping is known per machine, we'll pin it in a `cart/cameras/config.py` once the `cart/` package lands (see [`architecture.md`](./architecture.md#planned)). Longer-term, a udev rule on Linux (by USB path) or a unique-name match on macOS gives us enumeration-order-independent mapping.
+Current validated mapping on the dev laptop:
+
+| OS index | Label          | Hardware                              |
+|----------|----------------|---------------------------------------|
+| 0        | `front wide`   | fisheye, ~139° HFOV                   |
+| 1        | `left`         | fisheye, ~139° HFOV                   |
+| 2        | `front narrow` | varifocal 2.8–12 mm, 30–115° FOV      |
+| 3        | `right`        | fisheye, ~139° HFOV                   |
+
+Once this mapping is stable per machine, we'll pin it in `cart/cameras/config.py` once the `cart/` package lands (see [`architecture.md`](./architecture.md#planned)). Longer-term, a udev rule on Linux (by USB path) or a unique-name match on macOS gives us enumeration-order-independent mapping.
 
 ---
 
@@ -63,12 +72,12 @@ The script forces AVFoundation on macOS and V4L2 on Linux explicitly — OpenCV'
 
 ## Known issues
 
-### Narrow-front camera (BLUE, idx 2) shows one frame, then "no frame"
+### `front narrow` (idx 2) shows one frame, then "no frame"
 
 Bench session, four cameras on one USB 2.0 controller:
 
-- Red (front wide), green (left), yellow (right) stream fine.
-- Blue (narrow front, idx 2) produces a frame or two on open, then `cap.read()` starts returning `(False, None)` and the tile flips to the "no frame" placeholder.
+- `front wide`, `left`, and `right` stream fine.
+- `front narrow` (idx 2) produces a frame or two on open, then `cap.read()` starts returning `(False, None)` and the tile flips to the "no frame" placeholder.
 
 Hypotheses, in order of likelihood:
 
@@ -90,7 +99,7 @@ If any of those hold a steady frame, the issue is bandwidth/format, not the came
 
 ## Open TODOs
 
-- [ ] Label each physical camera (color → slot), commit the mapping.
+- [x] Label each physical camera (name + FOV → OS index), commit the mapping.
 - [ ] Set the varifocal zoom on the front-narrow camera to a fixed, documented FOV and tape it.
 - [ ] udev rule (Linux) / named-device match (macOS) to make the mapping survive reboots.
 - [ ] `cart.cameras.CameraRig` class that opens cameras by logical slot name, not OS index.

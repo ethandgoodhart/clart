@@ -96,6 +96,30 @@ The firmware watchdog and the host fault detection together mean: **yanking the 
 
 ---
 
+## Firmware workflow (no Arduino IDE)
+
+`.ino` files are the Arduino IDE's native format — but they're really just C++ with a preprocessor that auto-generates prototypes and injects `#include <Arduino.h>`. We keep the extension (it's what every AVR tool expects) and drive the toolchain from the CLI via [`arduino-cli`](https://arduino.github.io/arduino-cli/), which is what the IDE's green arrow calls under the hood.
+
+[`scripts/upload.py`](../scripts/upload.py) wraps `arduino-cli compile` + `arduino-cli upload` so the flow is one command:
+
+```bash
+uv run python scripts/upload.py --list                       # show sketches
+uv run python scripts/upload.py pedal_control                # compile + flash
+uv run python scripts/upload.py pedal_control --monitor      # then open serial
+uv run python scripts/upload.py pedal_control --compile-only # just build
+```
+
+Mechanics:
+
+- Board FQBN is `arduino:avr:mega` (works for Mega and Mega 2560).
+- Sketches are auto-discovered as every `sketches/<name>/<name>.ino`.
+- The Mega port auto-detects the same way the Python runtime scripts do — by USB VID, explicitly skipping the ODrive.
+- Shared headers under `sketches/common/` are added to the compiler's `-I` search path, so any sketch can `#include "cart_limits.h"` without caring where the build dir ends up.
+- `compile-only` is safe on a plugged-in Jetson — nothing is flashed unless upload is requested.
+- One-time setup on a new machine: `brew install arduino-cli`; the script installs the `arduino:avr` core on demand.
+
+---
+
 ## Cross-cutting: limits stay mirrored between Python and C
 
 Two files, one truth:

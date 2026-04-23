@@ -16,9 +16,11 @@ The cart has four UVC-class USB cameras:
 All four are standard UVC so no drivers are needed — macOS uses
 AVFoundation, Linux uses V4L2. Enumeration order on USB is not stable
 across boots — the mapping in ``LABELS`` below is what's currently
-plugged in on this machine; if a tile looks wrong, re-order ``LABELS``
-or re-plug cables until names match reality. We'll lock it into a
-cart.cameras config once the cart/ package lands.
+plugged in on this machine. Each tile is annotated in the top-left
+with its physical name (``front wide``, ``front narrow``, ``left``,
+``right``); if a name doesn't match reality, re-order ``LABELS`` or
+re-plug cables. We'll lock it into a ``cart.cameras`` config once the
+``cart/`` package lands.
 
 Bandwidth note: four MJPEG streams at 1080p30 will saturate a single
 USB 2.0 controller. Default is 640x480 which fits comfortably. If one
@@ -48,16 +50,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# Tile label + border color (BGR — OpenCV's native pixel order). The
-# order here is the order cameras are assigned to OS indices after
-# auto-find, so it has to match the physical enumeration on this
-# machine. Colors stay distinct so tiles are still easy to tell apart at
-# a glance; the labels carry the real camera identity + FOV.
-LABELS: list[tuple[str, tuple[int, int, int]]] = [
-    ("front wide (139°)",       (0, 0, 255)),     # red    — front fisheye
-    ("left (139°)",             (0, 220, 0)),     # green  — left fisheye
-    ("front narrow (30-115°)",  (255, 140, 0)),   # blue   — varifocal narrow
-    ("right (139°)",            (0, 220, 240)),   # yellow — right fisheye
+# Physical camera names, in the order they're assigned to OS indices
+# after auto-find. This must match the physical enumeration on this
+# machine; re-order if a tile doesn't match reality.
+LABELS: list[str] = [
+    "front wide",    # idx 0 — front fisheye
+    "left",          # idx 1 — left fisheye
+    "front narrow",  # idx 2 — varifocal narrow
+    "right",         # idx 3 — right fisheye
 ]
 
 DEFAULT_WIDTH = 640
@@ -155,34 +155,26 @@ def list_cameras(width: int, height: int) -> None:
         print("  (nothing found)")
 
 
-def annotate(frame: np.ndarray, label: str, color: tuple[int, int, int],
-             idx: int, fps: float) -> np.ndarray:
-    """Draw a colored border + big label + telemetry onto a frame."""
-    border = 8
-    framed = cv2.copyMakeBorder(
-        frame, border, border, border, border,
-        cv2.BORDER_CONSTANT, value=color,
-    )
-    # Scale the font so long labels like "front narrow (30-115°)" don't
-    # run off the side of a 640-wide tile. The scale drops as the label
-    # gets longer but never below a readable minimum.
-    scale = max(0.7, min(1.4, 18.0 / max(len(label), 1)))
-    thickness_outline = 4 if scale < 1.0 else 5
-    thickness_fill = 2 if scale < 1.0 else 3
-    cv2.putText(framed, label, (22, 52),
-                cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0),
-                thickness_outline, cv2.LINE_AA)
-    cv2.putText(framed, label, (22, 52),
-                cv2.FONT_HERSHEY_SIMPLEX, scale, color,
-                thickness_fill, cv2.LINE_AA)
+def annotate(frame: np.ndarray, label: str, idx: int, fps: float) -> np.ndarray:
+    """Draw the label in the top-left + telemetry in the bottom-left.
 
-    h, w = frame.shape[:2]
+    No colored border — keeps the frame clean and leaves the image
+    itself as the signal. Text gets a black outline so it stays legible
+    over any background.
+    """
+    out = frame.copy()
+    cv2.putText(out, label, (18, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4, cv2.LINE_AA)
+    cv2.putText(out, label, (18, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+
+    h, w = out.shape[:2]
     meta = f"idx {idx}  {w}x{h}  {fps:.0f} fps"
-    cv2.putText(framed, meta, (22, framed.shape[0] - 18),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.putText(framed, meta, (22, framed.shape[0] - 18),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (240, 240, 240), 1, cv2.LINE_AA)
-    return framed
+    cv2.putText(out, meta, (18, h - 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(out, meta, (18, h - 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1, cv2.LINE_AA)
+    return out
 
 
 def make_grid(frames: list[np.ndarray], cols: int = 2) -> np.ndarray:
@@ -250,7 +242,7 @@ def main() -> int:
         return 1
     if len(indices) > len(LABELS):
         print(f"ERROR: only {len(LABELS)} labels defined "
-              f"({[name for name, _ in LABELS]}). Pass fewer indices.")
+              f"({LABELS}). Pass fewer indices.")
         return 1
 
     caps: list[tuple[int, cv2.VideoCapture]] = []
@@ -268,8 +260,8 @@ def main() -> int:
     # Show what we actually got vs. what we requested — useful when the
     # driver silently quantizes resolution to the nearest supported mode.
     active_labels = LABELS[:len(caps)]
-    name_width = max(len(name) for name, _ in active_labels)
-    for (idx, cap), (name, _) in zip(caps, active_labels):
+    name_width = max(len(name) for name in active_labels)
+    for (idx, cap), name in zip(caps, active_labels):
         aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         print(f"[cams] {name:<{name_width}} -> index {idx}   actual {aw}x{ah}")
@@ -284,14 +276,15 @@ def main() -> int:
     try:
         while True:
             frames = []
-            for (idx, cap), (label, color) in zip(caps, active_labels):
+            for (idx, cap), label in zip(caps, active_labels):
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     frame = np.zeros((args.height, args.width, 3), dtype=np.uint8)
                     cv2.putText(
                         frame, f"{label}: no frame (idx {idx})",
                         (20, args.height // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2, cv2.LINE_AA,
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255),
+                        2, cv2.LINE_AA,
                     )
 
                 last_t, last_fps = fps_state[idx]
@@ -301,7 +294,7 @@ def main() -> int:
                 fps = 0.9 * last_fps + 0.1 * inst
                 fps_state[idx] = (now, fps)
 
-                frames.append(annotate(frame, label, color, idx, fps))
+                frames.append(annotate(frame, label, idx, fps))
 
             grid = make_grid(frames)
             cv2.imshow(window, grid)
