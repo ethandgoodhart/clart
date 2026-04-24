@@ -55,6 +55,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import threading
@@ -75,6 +76,14 @@ if str(_PROJECT_ROOT) not in sys.path:
 # config, and the pedals must not silently stop responding.
 os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
 
+# Headless mode (``--headless``) wires SDL to its dummy video driver so
+# ``set_mode`` / ``display.flip`` become silent no-ops and no window pops
+# up. The env var must be set *before* ``import pygame``; argparse runs
+# later in main(), so we pre-peek at argv. Callers can also just export
+# SDL_VIDEODRIVER themselves.
+if "--headless" in sys.argv:
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+
 import pygame
 
 from limits import (
@@ -93,8 +102,16 @@ from limits import (
 # --- Controller mapping (matches scripts/ps5_controller_test.py) -----------
 
 AXIS_LEFT_X = 0
-AXIS_L2 = 4
-AXIS_R2 = 5
+# DualSense trigger axes differ by platform / SDL driver:
+#   macOS (IOKit HID) → L2=4, R2=5
+#   Linux hid-playstation (Jetson) → L2=3, R2=4
+# Probe with /tmp/probe2.py if a new host maps them somewhere else.
+if sys.platform == "darwin":
+    AXIS_L2 = 4
+    AXIS_R2 = 5
+else:
+    AXIS_L2 = 3
+    AXIS_R2 = 4
 
 # DualSense face buttons on SDL 2.28+ (macOS / Linux): Cross=0, Circle=1,
 # Square=2, Triangle=3. Matches scripts/ps5_steer.py.
@@ -926,7 +943,31 @@ def parse_args() -> argparse.Namespace:
         "--stick-steering", choices=STICK_STEERING, default="integrated",
         help="integrated = trap-traj target slew (hold at release); absolute = stick maps to angle.",
     )
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="Run without a visible pygame window. Uses SDL's dummy video "
+             "driver and skips font/draw work for use alongside the web UI.",
+    )
+    parser.add_argument(
+        "--state-file", default=None,
+        help="If set, writes a JSON snapshot of controller state "
+             "(gas/brake/mph/steer/...) to this path every loop iteration. "
+             "The web UI polls it for the live speed readout.",
+    )
     return parser.parse_args()
+
+
+def write_state_file(path: Path, data: dict) -> None:
+    """Atomically replace ``path`` with a JSON snapshot of ``data``.
+
+    ps5_drive.py and the Flask UI are separate processes; the UI polls
+    this file to render the live MPH readout. Writing to a .tmp sibling
+    and renaming keeps the reader from ever seeing a half-written file.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
 
 
 def main() -> int:
@@ -959,13 +1000,24 @@ def main() -> int:
                 dry_run=args.dry_run, stick_steering=args.stick_steering,
             )
 
-        screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-        pygame.display.set_caption(
-            f"PS5 drive — {args.mode} ({args.stick_steering} steer)"
-        )
+        if args.headless:
+            # set_mode is still needed so SDL's event queue pumps —
+            # joystick events flow through it. With the dummy driver it
+            # renders nothing. SysFont is skipped because scanning the
+            # system font cache is slow and we won't draw anything.
+            screen = pygame.display.set_mode((1, 1))
+            font = None
+            font_small = None
+        else:
+            screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+            pygame.display.set_caption(
+                f"PS5 drive — {args.mode} ({args.stick_steering} steer)"
+            )
+            font = pygame.font.SysFont("Menlo", 22, bold=True)
+            font_small = pygame.font.SysFont("Menlo", 14)
         clock = pygame.time.Clock()
-        font = pygame.font.SysFont("Menlo", 22, bold=True)
-        font_small = pygame.font.SysFont("Menlo", 14)
+
+        state_file = Path(args.state_file) if args.state_file else None
 
         steer_target_deg = 0.0
         if (
@@ -1101,20 +1153,63 @@ def main() -> int:
                 with hw_lock:
                     steering.command_deg(cmd_deg, lx=lx, dlx_dt=dlx_dt, dt_s=dt_s)
 
-            draw_ui(screen, font, font_small, {
-                "mode": args.mode,
-                "dry_run": args.dry_run,
-                "control_steering": control_steering,
-                "control_pedals": control_pedals,
-                "stick_steering": args.stick_steering,
-                "lx": lx, "l2": l2, "r2": r2,
-                "steer_deg": steer_deg,
-                "gas": gas, "brake": brake,
-                "gas_cap": gas_cap,
-                "hb_age_s": pedals.heartbeat_age_s if pedals is not None else 0.0,
-                "hb_faulted": pedals.faulted if pedals is not None else False,
-                "hb_fault_reason": pedals.fault_reason if pedals is not None else None,
-            })
+            gas_frac = gas / gas_cap if gas_cap > 0 else 0.0
+            brake_frac = brake / BRAKE_POT_MAX if BRAKE_POT_MAX > 0 else 0.0
+            # Direct-read speed display: full gas = 20 MPH, brake subtracts
+            # proportionally. No physics/inertia — this is a readout, not a
+            # simulation.
+            mph = max(0.0, min(20.0, (gas_frac - brake_frac) * 20.0))
+
+            arduino_connected = (
+                control_pedals
+                and pedals is not None
+                and not pedals.faulted
+                and (pedals.dry_run or pedals.ser is not None)
+            )
+            motor_connected = (
+                control_steering
+                and steering is not None
+                and (steering.dry_run or steering.axis is not None)
+            )
+
+            if state_file is not None:
+                try:
+                    write_state_file(state_file, {
+                        "mode": args.mode,
+                        "dry_run": args.dry_run,
+                        "stick_steering": args.stick_steering,
+                        "lx": lx, "l2": l2, "r2": r2,
+                        "steer_deg": steer_deg,
+                        "gas": gas, "brake": brake,
+                        "gas_cap": gas_cap, "brake_max": BRAKE_POT_MAX,
+                        "gas_frac": gas_frac, "brake_frac": brake_frac,
+                        "mph": mph,
+                        "controller_connected": True,
+                        "arduino_connected": arduino_connected,
+                        "motor_connected": motor_connected,
+                        "hb_age_s": pedals.heartbeat_age_s if pedals is not None else 0.0,
+                        "hb_faulted": pedals.faulted if pedals is not None else False,
+                        "hb_fault_reason": pedals.fault_reason if pedals is not None else None,
+                        "ts": time.time(),
+                    })
+                except Exception as e:
+                    print(f"[state] write failed: {e!r}")
+
+            if not args.headless:
+                draw_ui(screen, font, font_small, {
+                    "mode": args.mode,
+                    "dry_run": args.dry_run,
+                    "control_steering": control_steering,
+                    "control_pedals": control_pedals,
+                    "stick_steering": args.stick_steering,
+                    "lx": lx, "l2": l2, "r2": r2,
+                    "steer_deg": steer_deg,
+                    "gas": gas, "brake": brake,
+                    "gas_cap": gas_cap,
+                    "hb_age_s": pedals.heartbeat_age_s if pedals is not None else 0.0,
+                    "hb_faulted": pedals.faulted if pedals is not None else False,
+                    "hb_fault_reason": pedals.fault_reason if pedals is not None else None,
+                })
             clock.tick(CONTROL_HZ)
 
     except KeyboardInterrupt:

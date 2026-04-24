@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FSD · Golf Cart</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Playfair+Display:ital,wght@0,600;0,700;1,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div id="scene-container"></div>
+
+    <!-- Top status bar -->
+    <header class="top-bar">
+        <div class="top-left">
+            <div class="brand">
+                <div class="brand-mark">Caddy</div>
+                <div class="brand-version">v1.0.0</div>
+            </div>
+        </div>
+        <div class="top-center">
+            <div class="autopilot-badge">
+                <img class="ap-icon" src="{{ url_for('static', filename='img/ps5-controller.png') }}" alt="" aria-hidden="true" />
+                <span>Controller Mode</span>
+                <span class="status-dot" id="controller-dot" title="Controller"></span>
+            </div>
+            <div class="hw-status" id="hw-status">
+                <span class="hw-item" id="hw-motor" title="Motor / ODrive">
+                    <span class="hw-dot"></span><span class="hw-label">Motor</span>
+                </span>
+                <span class="hw-item" id="hw-arduino" title="Arduino / Pedals">
+                    <span class="hw-dot"></span><span class="hw-label">Arduino</span>
+                </span>
+            </div>
+        </div>
+        <div class="top-right">
+            <div class="time" id="time">—</div>
+            <div class="battery">
+                <span class="battery-pct">87%</span>
+                <div class="battery-icon"><div class="battery-fill"></div></div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Center speed readout -->
+    <div class="speed-cluster">
+        <div class="speed-readout">
+            <div class="speed-value" id="speed">24</div>
+            <div class="speed-unit">MPH</div>
+        </div>
+        <div class="speed-limit">
+            <div class="limit-sign">
+                <div class="limit-label">SPEED<br/>LIMIT</div>
+                <div class="limit-number">25</div>
+            </div>
+        </div>
+    </div>
+    <!-- (P R N D gear selector intentionally removed) -->
+
+    <!-- Bottom info row (temporarily hidden)
+    <footer class="bottom-bar">
+        <div class="info-block">
+            <div class="info-label">NEXT</div>
+            <div class="info-value">Straight 0.3 mi</div>
+        </div>
+        <div class="info-block center">
+            <div class="info-label">ROUTE</div>
+            <div class="info-value">Campus Loop · 4 min</div>
+        </div>
+        <div class="info-block right">
+            <div class="info-label">RANGE</div>
+            <div class="info-value">142 mi</div>
+        </div>
+    </footer>
+    -->
+
+
+    <!-- Bottom-left HUD: steering wheel + gas/brake bar -->
+    <div class="hud-bottom-left">
+        <div class="steering-widget">
+            <svg class="wheel-svg" viewBox="0 0 100 100" aria-hidden="true">
+                <g id="wheel-rotate">
+                    <circle cx="50" cy="50" r="40" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                    <circle cx="50" cy="50" r="10.5" fill="none" stroke="currentColor" stroke-width="3"/>
+                    <line x1="11" y1="50" x2="39" y2="50" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                    <line x1="61" y1="50" x2="89" y2="50" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                    <line x1="50" y1="61" x2="50" y2="89" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                </g>
+            </svg>
+            <div class="steering-angle" id="steer-angle">0°</div>
+        </div>
+        <div class="pedal-stack" id="pedal-stack" aria-hidden="true"></div>
+    </div>
+
+    <!-- Left turn signal stack -->
+    <div class="side-indicators left">
+        <div class="indicator-dot"></div>
+        <div class="indicator-dot"></div>
+        <div class="indicator-dot"></div>
+    </div>
+    <div class="side-indicators right">
+        <div class="indicator-dot"></div>
+        <div class="indicator-dot"></div>
+        <div class="indicator-dot"></div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module" src="{{ url_for('static', filename='js/scene.js') }}"></script>
+    <script>
+        function tick() {
+            const d = new Date();
+            const h = d.getHours();
+            const m = d.getMinutes().toString().padStart(2, '0');
+            const hh = ((h + 11) % 12 + 1);
+            const ap = h >= 12 ? 'PM' : 'AM';
+            document.getElementById('time').textContent = `${hh}:${m} ${ap}`;
+        }
+        tick();
+        setInterval(tick, 1000);
+
+        const speedEl = document.getElementById('speed');
+        const wheelEl = document.getElementById('wheel-rotate');
+        const angleEl = document.getElementById('steer-angle');
+
+        // Pedal stack: 10 gas dashes (top) + 10 brake dashes (bottom). Dashes
+        // closest to the center light up first, extending outward as the
+        // driver presses harder — the center stays quiet when idle.
+        const PEDAL_COUNT = 10;
+        const stackEl = document.getElementById('pedal-stack');
+        const gasDashes = [];
+        const brakeDashes = [];
+        for (let i = 0; i < PEDAL_COUNT; i++) {
+            const d = document.createElement('div');
+            d.className = 'pedal-dash gas';
+            stackEl.appendChild(d);
+            gasDashes.push(d);  // index 0 = top (max gas)
+        }
+        for (let i = 0; i < PEDAL_COUNT; i++) {
+            const d = document.createElement('div');
+            d.className = 'pedal-dash brake';
+            stackEl.appendChild(d);
+            brakeDashes.push(d);  // index 0 = just below center, last = bottom
+        }
+
+        function updatePedalStack(gasFrac, brakeFrac) {
+            const gasLit = Math.round(gasFrac * PEDAL_COUNT);
+            const brakeLit = Math.round(brakeFrac * PEDAL_COUNT);
+            const gasEdge = gasLit > 0 ? PEDAL_COUNT - gasLit : -1;
+            const brakeEdge = brakeLit > 0 ? brakeLit - 1 : -1;
+            for (let i = 0; i < PEDAL_COUNT; i++) {
+                // gasDashes[0] is at the top = last to light up.
+                gasDashes[i].classList.toggle('active', i >= PEDAL_COUNT - gasLit);
+                gasDashes[i].classList.toggle('edge', i === gasEdge);
+                // brakeDashes[0] is just below center = first to light up.
+                brakeDashes[i].classList.toggle('active', i < brakeLit);
+                brakeDashes[i].classList.toggle('edge', i === brakeEdge);
+            }
+        }
+
+        const controllerDot = document.getElementById('controller-dot');
+        const motorItem = document.getElementById('hw-motor');
+        const arduinoItem = document.getElementById('hw-arduino');
+
+        function setConnected(el, connected) {
+            el.classList.toggle('connected', !!connected);
+        }
+
+        async function pollState() {
+            try {
+                const r = await fetch('/state', { cache: 'no-store' });
+                if (!r.ok) return;
+                const s = await r.json();
+                speedEl.textContent = Math.round(Number(s.mph) || 0);
+
+                const steerDeg = Number(s.steer_deg) || 0;
+                wheelEl.style.transform = `rotate(${steerDeg}deg)`;
+                angleEl.textContent = `${steerDeg >= 0 ? '+' : ''}${steerDeg.toFixed(0)}°`;
+
+                updatePedalStack(
+                    Math.max(0, Math.min(1, Number(s.gas_frac) || 0)),
+                    Math.max(0, Math.min(1, Number(s.brake_frac) || 0)),
+                );
+
+                setConnected(controllerDot, s.controller_connected);
+                setConnected(motorItem, s.motor_connected);
+                setConnected(arduinoItem, s.arduino_connected);
+            } catch (e) {
+                setConnected(controllerDot, false);
+                setConnected(motorItem, false);
+                setConnected(arduinoItem, false);
+            }
+        }
+        pollState();
+        setInterval(pollState, 80);
+    </script>
+</body>
+</html>
